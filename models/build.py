@@ -61,7 +61,7 @@ def build_model(config, is_pretrain=False):
                                   patch_norm=config.MODEL.SWINV2.PATCH_NORM,
                                   use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                   pretrained_window_sizes=config.MODEL.SWINV2.PRETRAINED_WINDOW_SIZES)
-    elif model_type == 'swing':
+    elif model_type == 'swin_g':
         model = SwinTransformerG(img_size=config.DATA.IMG_SIZE,
                                  patch_size=config.MODEL.SWIN.PATCH_SIZE,
                                  in_chans=config.MODEL.SWIN.IN_CHANS,

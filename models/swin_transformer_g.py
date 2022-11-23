@@ -99,7 +99,7 @@ class WindowAttention(nn.Module):
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))  # 2*Wh-1 * 2*Ww-1, nH
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads*2))  # 2*Wh-1 * 2*Ww-1, nH
 
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
@@ -135,9 +135,10 @@ class WindowAttention(nn.Module):
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
-        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        relative_position_params = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH*2
+        relative_position_params = relative_position_params.permute(2, 0, 1).contiguous()  # nH*2, Wh*Ww, Wh*Ww
+        relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -147,6 +148,8 @@ class WindowAttention(nn.Module):
             attn = self.softmax(attn)
         else:
             attn = self.softmax(attn)
+            
+        attn = attn * relative_position_scale.unsqueeze(0)
 
         attn = self.attn_drop(attn)
 
@@ -165,6 +168,8 @@ class WindowAttention(nn.Module):
         flops += N * self.dim * 3 * self.dim
         # attn = (q @ k.transpose(-2, -1))
         flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        # attn = attn*relative_position_scale.unsqueeze(0)
+        flops += self.num_heads * N * N
         #  x = (attn @ v)
         flops += self.num_heads * N * N * (self.dim // self.num_heads)
         # x = self.proj(x)

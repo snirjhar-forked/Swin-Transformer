@@ -89,7 +89,7 @@ class WindowAttention(nn.Module):
     """
 
     def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.,
-                 token_drop_ratio=0.):
+                 token_drop_ratio=0., split_kv=None):
 
         super().__init__()
         self.dim = dim
@@ -98,6 +98,10 @@ class WindowAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
         self.token_drop_ratio = token_drop_ratio
+        
+        if split_kv is None:
+            split_kv = token_drop_ratio > 0
+        self.split_kv = split_kv
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -116,8 +120,11 @@ class WindowAttention(nn.Module):
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer("relative_position_index", relative_position_index)
 
-        self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        if not self.split_kv:
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        else:
+            self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
+            self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -132,14 +139,22 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        q = self.q_lin(x).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        x_kv = x
         drop_cond = self.training and self.token_drop_ratio > 0
-        if drop_cond:
-            randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
-            x_kv = torch.index_select(x_kv, -2, randpos)
-        kv = self.kv_lin(x_kv).reshape(B_, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        k, v = kv.unbind(0)
+        if not self.split_kv:
+            qkv = self.qkv(x).reshape(B_, -1, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            if drop_cond:
+                randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
+                k = torch.index_select(k, -2, randpos)
+                v = torch.index_select(v, -2, randpos)
+        else:
+            q = self.q_lin(x).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            x_kv = x
+            if drop_cond:
+                randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
+                x_kv = torch.index_select(x_kv, -2, randpos)
+            kv = self.kv_lin(x_kv).reshape(B_, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            k, v = kv.unbind(0)
             
 
         q = q * self.scale

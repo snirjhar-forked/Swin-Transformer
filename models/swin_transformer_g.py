@@ -88,7 +88,8 @@ class WindowAttention(nn.Module):
         proj_drop (float, optional): Dropout ratio of output. Default: 0.0
     """
 
-    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 token_drop_ratio=0.):
 
         super().__init__()
         self.dim = dim
@@ -96,6 +97,7 @@ class WindowAttention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
+        self.token_drop_ratio = token_drop_ratio
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -114,7 +116,8 @@ class WindowAttention(nn.Module):
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer("relative_position_index", relative_position_index)
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -129,22 +132,34 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q = self.q_lin(x).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        x_kv = x
+        drop_cond = self.training and self.token_drop_ratio > 0
+        if drop_cond:
+            randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
+            x_kv = torch.index_select(x_kv, -2, randpos)
+        kv = self.kv_lin(x_kv).reshape(B_, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv.unbind(0)
+            
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
-
-        relative_position_params = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH*2
+        
+        rpi = self.relative_position_index
+        if drop_cond:
+            rpi = torch.index_select(rpi, -1, randpos)
+        relative_position_params = self.relative_position_bias_table[rpi.view(-1)].view(
+            self.window_size[0] * self.window_size[1], -1, self.num_heads*2)  # Wh*Ww,Wh*Ww,nH*2
         relative_position_params = relative_position_params.permute(2, 0, 1).contiguous()  # nH*2, Wh*Ww, Wh*Ww
         relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
+            if drop_cond:
+                mask = torch.index_select(mask, -1, randpos)
             nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, -1) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(B_, self.num_heads, N, -1)
             attn = self.softmax(attn)
         else:
             attn = self.softmax(attn)
@@ -199,6 +214,7 @@ class SwinTransformerBlock(nn.Module):
 
     def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
+                 token_drop=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  fused_window_process=False):
         super().__init__()
@@ -208,6 +224,7 @@ class SwinTransformerBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
+        self.token_drop = token_drop
         if min(self.input_resolution) <= self.window_size:
             # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
@@ -217,7 +234,8 @@ class SwinTransformerBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
             dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
-            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+            token_drop_ratio=token_drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -300,7 +318,8 @@ class SwinTransformerBlock(nn.Module):
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
-               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
+               f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}" \
+                   f"token_drop={self.token_drop}"
 
     def flops(self):
         flops = 0
@@ -388,7 +407,7 @@ class BasicLayer(nn.Module):
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
+                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., token_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
                  fused_window_process=False):
 
@@ -407,6 +426,7 @@ class BasicLayer(nn.Module):
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                                 token_drop=token_drop[i] if isinstance(token_drop, list) else token_drop,
                                  norm_layer=norm_layer,
                                  fused_window_process=fused_window_process)
             for i in range(depth)])
@@ -518,6 +538,7 @@ class SwinTransformerG(nn.Module):
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 token_drop_min=0., token_drop_max=0., token_drop_pattern='lin',
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  use_checkpoint=False, fused_window_process=False, **kwargs):
         super().__init__()
@@ -547,7 +568,21 @@ class SwinTransformerG(nn.Module):
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
-
+        
+        # drop ratio
+        token_drp_pattern = torch.linspace(0., 1., sum(depths))
+        if token_drop_pattern == 'lin':
+            token_drp_ratios = token_drop_min + token_drp_pattern * (token_drop_max - token_drop_min)
+        elif token_drop_pattern == 'exp':
+            token_drop_min_log = torch.log(torch.tensor(token_drop_min))
+            token_drop_max_log = torch.log(torch.tensor(token_drop_max))
+            token_drp_ratios_log = token_drop_min_log + token_drp_pattern * (token_drop_max_log - token_drop_min_log)
+            token_drp_ratios = torch.exp(token_drp_ratios_log)
+        else:
+            raise ValueError('Unknown token_drop_pattern: {}'.format(token_drop_pattern))
+        token_drp_ratios = token_drp_ratios.tolist()
+        
+        
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
@@ -561,6 +596,7 @@ class SwinTransformerG(nn.Module):
                                qkv_bias=qkv_bias, qk_scale=qk_scale,
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                               token_drop=token_drp_ratios[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint,

@@ -74,6 +74,11 @@ def window_reverse(windows, window_size, H, W):
     return x
 
 
+@torch.jit.script
+def sigmul2(x):
+    return torch.sigmoid(x) * 2.0
+
+
 class WindowAttention(nn.Module):
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -141,7 +146,7 @@ class WindowAttention(nn.Module):
         B_, N, C = x.shape
         drop_cond = self.training and self.token_drop_ratio > 0
         if not self.split_kv:
-            qkv = self.qkv(x).reshape(B_, -1, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             if drop_cond:
                 randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
@@ -167,19 +172,21 @@ class WindowAttention(nn.Module):
             self.window_size[0] * self.window_size[1], -1, self.num_heads*2)  # Wh*Ww,Wh*Ww,nH*2
         relative_position_params = relative_position_params.permute(2, 0, 1).contiguous()  # nH*2, Wh*Ww, Wh*Ww
         relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0)
-        attn = attn + relative_position_bias.unsqueeze(0)
+        attn = attn + relative_position_bias
+        gates = relative_position_scale # nH, Wh*Ww, Wh*Ww
 
         if mask is not None:
             if drop_cond:
                 mask = torch.index_select(mask, -1, randpos)
             nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, -1) + mask.unsqueeze(1).unsqueeze(0)
+            mask = mask.unsqueeze(1) # nW, 1, Wh*Ww, Wh*Ww
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, -1)
+            attn = attn + mask
+            gates = gates + mask # nW, nH, Wh*Ww, Wh*Ww
+            attn = self.softmax(attn) * sigmul2(gates)
             attn = attn.view(B_, self.num_heads, N, -1)
-            attn = self.softmax(attn)
         else:
-            attn = self.softmax(attn)
-            
-        attn = attn * relative_position_scale.unsqueeze(0)
+            attn = self.softmax(attn) * sigmul2(gates)
 
         attn = self.attn_drop(attn)
 

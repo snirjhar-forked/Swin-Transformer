@@ -585,14 +585,25 @@ class SwinTransformerG(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
         
         # drop ratio
-        token_drp_pattern = torch.linspace(0., 1., sum(depths))
-        if token_drop_pattern == 'lin':
-            token_drp_ratios = token_drop_min + token_drp_pattern * (token_drop_max - token_drop_min)
-        elif token_drop_pattern == 'exp':
-            token_drop_min_log = torch.log(torch.tensor(token_drop_min))
-            token_drop_max_log = torch.log(torch.tensor(token_drop_max))
-            token_drp_ratios_log = token_drop_min_log + token_drp_pattern * (token_drop_max_log - token_drop_min_log)
-            token_drp_ratios = torch.exp(token_drp_ratios_log)
+        if len(token_drop_max) == 1:
+            token_drop_max = token_drop_max * len(depths)
+        if len(token_drop_min) == 1:
+            token_drop_min = token_drop_min * len(depths)
+        if 'lin' in token_drop_pattern:
+            token_drp_ratios = []
+            assert len(token_drop_min) == len(token_drop_max) == len(depths)
+            for dpth, mn, mx in zip(depths, token_drop_min, token_drop_max):
+                token_drp_ratios.extend(torch.linspace(mn, mx, dpth).tolist())
+            token_drp_ratios = torch.tensor(token_drp_ratios)
+        elif 'exp' in token_drop_pattern:
+            token_drp_ratios = []
+            assert len(token_drop_min) == len(token_drop_max) == len(depths)
+            for dpth, mn, mx in zip(depths, token_drop_min, token_drop_max):
+                token_drop_min_log = torch.log(torch.tensor(mn))
+                token_drop_max_log = torch.log(torch.tensor(mx))
+                token_drp_ratios_log = torch.linspace(token_drop_min_log, token_drop_max_log, dpth)
+                token_drp_ratios.extend(torch.exp(token_drp_ratios_log).tolist())
+            token_drp_ratios = torch.tensor(token_drp_ratios)
         else:
             raise ValueError('Unknown token_drop_pattern: {}'.format(token_drop_pattern))
         token_drp_ratios = token_drp_ratios.tolist()

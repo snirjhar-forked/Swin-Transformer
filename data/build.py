@@ -51,7 +51,11 @@ def build_loader(config):
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
     if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
-        indices = np.arange(dist.get_rank(), len(dataset_train), dist.get_world_size())
+        num_samples = len(dataset_train)
+        pad_len = num_tasks - num_samples % num_tasks
+        all_indices = np.arange(num_samples)
+        all_indices = np.concatenate([all_indices, np.arange(pad_len)])
+        indices = all_indices[global_rank::num_tasks]
         sampler_train = SubsetRandomSampler(indices)
     else:
         sampler_train = torch.utils.data.DistributedSampler(

@@ -161,7 +161,6 @@ class WindowAttention(nn.Module):
             kv = self.kv_lin(x_kv).reshape(B_, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             k, v = kv.unbind(0)
             
-
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
         
@@ -205,7 +204,123 @@ class WindowAttention(nn.Module):
         flops += N * self.dim * 3 * self.dim
         # attn = (q @ k.transpose(-2, -1))
         flops += self.num_heads * N * (self.dim // self.num_heads) * N
-        # attn = attn*relative_position_scale.unsqueeze(0)
+        # attn = attn*relative_position_scale
+        flops += self.num_heads * N * N
+        #  x = (attn @ v)
+        flops += self.num_heads * N * N * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
+
+
+
+class WindowAttentionK(nn.Module):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 token_drop_ratio=0.):
+
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        self.token_drop_ratio = token_drop_ratio
+
+        # define a parameter table of relative position bias
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads*2))  # 2*Wh-1 * 2*Ww-1, nH
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        self.register_buffer("relative_position_index", relative_position_index)
+
+        self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kvw_lin = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        trunc_normal_(self.relative_position_bias_table, std=.02)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, N, C)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        B_, N, C = x.shape
+        drop_cond = self.training and self.token_drop_ratio > 0
+        q = self.q_lin(x).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        x_kvw = x
+        if drop_cond:
+            randpos = torch.randperm(N, device=x.device)[round(N * self.token_drop_ratio):]
+            x_kvw = torch.index_select(x_kvw, -2, randpos)
+        kvw = self.kvw_lin(x_kvw).reshape(B_, -1, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v, w = kvw.unbind(0)
+
+        q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
+        gates = (q @ w.transpose(-2, -1))
+        
+        rpi = self.relative_position_index
+        if drop_cond:
+            rpi = torch.index_select(rpi, -1, randpos)
+        relative_position_params = self.relative_position_bias_table[rpi.view(-1)].view(
+            self.window_size[0] * self.window_size[1], -1, self.num_heads*2)  # Wh*Ww,Wh*Ww,nH*2
+        relative_position_params = relative_position_params.permute(2, 0, 1).contiguous()  # nH*2, Wh*Ww, Wh*Ww
+        relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0)
+        
+        attn = attn + relative_position_bias
+        gates = gates + relative_position_scale
+
+        if mask is not None:
+            if drop_cond:
+                mask = torch.index_select(mask, -1, randpos)
+            nW = mask.shape[0]
+            mask = mask.unsqueeze(1)
+            
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, -1)
+            attn = attn + mask
+            attn = attn.view(B_, self.num_heads, N, -1)
+            
+            gates = gates.view(B_ // nW, nW, self.num_heads, N, -1)
+            gates = gates + mask
+            gates = gates.view(B_, self.num_heads, N, -1)
+        
+        attn = self.softmax(attn)
+        gates = sigmul2(gates)
+        attn = attn * gates
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
+
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 4 * self.dim
+        # attn = (q @ k.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        # gates = (q @ w.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        # attn = attn*gates
         flops += self.num_heads * N * N
         #  x = (attn @ v)
         flops += self.num_heads * N * N * (self.dim // self.num_heads)
@@ -254,7 +369,7 @@ class SwinTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
+        self.attn = WindowAttentionK(
             dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             token_drop_ratio=token_drop)

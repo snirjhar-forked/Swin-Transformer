@@ -227,9 +227,28 @@ class WindowAttentionK(nn.Module):
         self.token_drop_ratio = token_drop_ratio
 
         # define a parameter table of relative position bias
-        self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads*2))  # 2*Wh-1 * 2*Ww-1, nH
+        # self.relative_position_bias_table = nn.Parameter(
+        #     torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads*2))  # 2*Wh-1 * 2*Ww-1, nH
 
+        # mlp to generate continuous relative position bias
+        self.cpb_mlp = nn.Sequential(nn.Linear(2, 512, bias=True),
+                                     nn.ReLU(inplace=True),
+                                     nn.Linear(512, num_heads*2, bias=False))
+
+        # get relative_coords_table
+        relative_coords_h = torch.arange(-(self.window_size[0] - 1), self.window_size[0], dtype=torch.float32)
+        relative_coords_w = torch.arange(-(self.window_size[1] - 1), self.window_size[1], dtype=torch.float32)
+        relative_coords_table = torch.stack(
+            torch.meshgrid([relative_coords_h,
+                            relative_coords_w])).permute(1, 2, 0).contiguous().unsqueeze(0)
+        relative_coords_table[:, :, :, 0] /= (self.window_size[0] - 1)
+        relative_coords_table[:, :, :, 1] /= (self.window_size[1] - 1)
+        relative_coords_table *= 8  # normalize to -8, 8
+        relative_coords_table = torch.sign(relative_coords_table) * torch.log2(
+            torch.abs(relative_coords_table) + 1.0) / 3
+
+        self.register_buffer("relative_coords_table", relative_coords_table)
+        
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
@@ -249,7 +268,7 @@ class WindowAttentionK(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        trunc_normal_(self.relative_position_bias_table, std=.02)
+        # trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, mask=None):
@@ -275,7 +294,8 @@ class WindowAttentionK(nn.Module):
         rpi = self.relative_position_index
         if drop_cond:
             rpi = torch.index_select(rpi, -1, randpos)
-        relative_position_params = self.relative_position_bias_table[rpi.view(-1)].view(
+        relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads*2)
+        relative_position_params = relative_position_bias_table[rpi.view(-1)].view(
             self.window_size[0] * self.window_size[1], -1, self.num_heads*2)  # Wh*Ww,Wh*Ww,nH*2
         relative_position_params = relative_position_params.permute(2, 0, 1).contiguous()  # nH*2, Wh*Ww, Wh*Ww
         relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0)

@@ -20,8 +20,8 @@ def create_logger(output_dir, dist_rank=0, name=''):
     logger.propagate = False
 
     # create formatter
-    fmt = '[%(asctime)s %(name)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s'
-    color_fmt = colored('[%(asctime)s %(name)s]', 'green') + \
+    fmt = '[%(asctime)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s'
+    color_fmt = colored('[%(asctime)s]', 'green') + \
                 colored('(%(filename)s %(lineno)d)', 'yellow') + ': %(levelname)s %(message)s'
 
     # create console handlers for master process

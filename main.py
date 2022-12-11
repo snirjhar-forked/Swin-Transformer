@@ -338,7 +338,7 @@ if __name__ == '__main__':
     logger = create_logger(output_dir=config.OUTPUT, dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
 
     if dist.get_rank() == 0:
-        path = os.path.join(config.OUTPUT, "config.json")
+        path = os.path.join(config.OUTPUT, "config.yaml")
         with open(path, "w") as f:
             f.write(config.dump())
         logger.info(f"Full config saved to {path}")

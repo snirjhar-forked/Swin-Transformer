@@ -38,11 +38,6 @@ _C.DATA.PIN_MEMORY = True
 # Number of data loading threads
 _C.DATA.NUM_WORKERS = 8
 
-# [SimMIM] Mask patch size for MaskGenerator
-_C.DATA.MASK_PATCH_SIZE = 32
-# [SimMIM] Mask ratio for MaskGenerator
-_C.DATA.MASK_RATIO = 0.6
-
 # -----------------------------------------------------------------------------
 # Model settings
 # -----------------------------------------------------------------------------
@@ -111,53 +106,6 @@ _C.MODEL.SWINV2.APE = False
 _C.MODEL.SWINV2.PATCH_NORM = True
 _C.MODEL.SWINV2.PRETRAINED_WINDOW_SIZES = [0, 0, 0, 0]
 
-# Swin Transformer MoE parameters
-_C.MODEL.SWIN_MOE = CN()
-_C.MODEL.SWIN_MOE.PATCH_SIZE = 4
-_C.MODEL.SWIN_MOE.IN_CHANS = 3
-_C.MODEL.SWIN_MOE.EMBED_DIM = 96
-_C.MODEL.SWIN_MOE.DEPTHS = [2, 2, 6, 2]
-_C.MODEL.SWIN_MOE.NUM_HEADS = [3, 6, 12, 24]
-_C.MODEL.SWIN_MOE.WINDOW_SIZE = 7
-_C.MODEL.SWIN_MOE.MLP_RATIO = 4.
-_C.MODEL.SWIN_MOE.QKV_BIAS = True
-_C.MODEL.SWIN_MOE.QK_SCALE = None
-_C.MODEL.SWIN_MOE.APE = False
-_C.MODEL.SWIN_MOE.PATCH_NORM = True
-_C.MODEL.SWIN_MOE.MLP_FC2_BIAS = True
-_C.MODEL.SWIN_MOE.INIT_STD = 0.02
-_C.MODEL.SWIN_MOE.PRETRAINED_WINDOW_SIZES = [0, 0, 0, 0]
-_C.MODEL.SWIN_MOE.MOE_BLOCKS = [[-1], [-1], [-1], [-1]]
-_C.MODEL.SWIN_MOE.NUM_LOCAL_EXPERTS = 1
-_C.MODEL.SWIN_MOE.TOP_VALUE = 1
-_C.MODEL.SWIN_MOE.CAPACITY_FACTOR = 1.25
-_C.MODEL.SWIN_MOE.COSINE_ROUTER = False
-_C.MODEL.SWIN_MOE.NORMALIZE_GATE = False
-_C.MODEL.SWIN_MOE.USE_BPR = True
-_C.MODEL.SWIN_MOE.IS_GSHARD_LOSS = False
-_C.MODEL.SWIN_MOE.GATE_NOISE = 1.0
-_C.MODEL.SWIN_MOE.COSINE_ROUTER_DIM = 256
-_C.MODEL.SWIN_MOE.COSINE_ROUTER_INIT_T = 0.5
-_C.MODEL.SWIN_MOE.MOE_DROP = 0.0
-_C.MODEL.SWIN_MOE.AUX_LOSS_WEIGHT = 0.01
-
-# Swin MLP parameters
-_C.MODEL.SWIN_MLP = CN()
-_C.MODEL.SWIN_MLP.PATCH_SIZE = 4
-_C.MODEL.SWIN_MLP.IN_CHANS = 3
-_C.MODEL.SWIN_MLP.EMBED_DIM = 96
-_C.MODEL.SWIN_MLP.DEPTHS = [2, 2, 6, 2]
-_C.MODEL.SWIN_MLP.NUM_HEADS = [3, 6, 12, 24]
-_C.MODEL.SWIN_MLP.WINDOW_SIZE = 7
-_C.MODEL.SWIN_MLP.MLP_RATIO = 4.
-_C.MODEL.SWIN_MLP.APE = False
-_C.MODEL.SWIN_MLP.PATCH_NORM = True
-
-# [SimMIM] Norm target during training
-_C.MODEL.SIMMIM = CN()
-_C.MODEL.SIMMIM.NORM_TARGET = CN()
-_C.MODEL.SIMMIM.NORM_TARGET.ENABLE = False
-_C.MODEL.SIMMIM.NORM_TARGET.PATCH_SIZE = 47
 
 # -----------------------------------------------------------------------------
 # Training settings
@@ -190,9 +138,6 @@ _C.TRAIN.LR_SCHEDULER.DECAY_EPOCHS = 30
 _C.TRAIN.LR_SCHEDULER.DECAY_RATE = 0.1
 # warmup_prefix used in CosineLRScheduler
 _C.TRAIN.LR_SCHEDULER.WARMUP_PREFIX = True
-# [SimMIM] Gamma / Multi steps value, used in MultiStepLRScheduler
-_C.TRAIN.LR_SCHEDULER.GAMMA = 0.1
-_C.TRAIN.LR_SCHEDULER.MULTISTEPS = []
 
 # Optimizer
 _C.TRAIN.OPTIMIZER = CN()
@@ -204,13 +149,6 @@ _C.TRAIN.OPTIMIZER.BETAS = (0.9, 0.999)
 # SGD momentum
 _C.TRAIN.OPTIMIZER.MOMENTUM = 0.9
 
-# [SimMIM] Layer decay for fine-tuning
-_C.TRAIN.LAYER_DECAY = 1.0
-
-# MoE
-_C.TRAIN.MOE = CN()
-# Only save model on master device
-_C.TRAIN.MOE.SAVE_MASTER = False
 # -----------------------------------------------------------------------------
 # Augmentation settings
 # -----------------------------------------------------------------------------
@@ -251,9 +189,6 @@ _C.TEST.SHUFFLE = False
 # -----------------------------------------------------------------------------
 # Misc
 # -----------------------------------------------------------------------------
-# [SimMIM] Whether to enable pytorch amp, overwritten by command line argument
-_C.ENABLE_AMP = False
-
 # Enable Pytorch automatic mixed precision (amp).
 _C.AMP_ENABLE = True
 # [Deprecated] Mixed precision opt level of apex, if O0, no apex amp is used ('O0', 'O1', 'O2')
@@ -338,9 +273,6 @@ def update_config(config, args):
     if _check_args('throughput'):
         config.THROUGHPUT_MODE = True
 
-    # [SimMIM]
-    if _check_args('enable_amp'):
-        config.ENABLE_AMP = args.enable_amp
 
     # for acceleration
     if _check_args('fused_window_process'):

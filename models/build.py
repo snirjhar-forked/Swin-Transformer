@@ -10,7 +10,7 @@ from .swin_transformer_v2 import SwinTransformerV2
 from .swin_transformer_g import SwinTransformerG
 
 
-def build_model(config, is_pretrain=False):
+def build_model(config):
     model_type = config.MODEL.TYPE
 
     # accelerate layernorm

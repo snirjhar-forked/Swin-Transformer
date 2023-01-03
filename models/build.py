@@ -8,6 +8,7 @@
 from .swin_transformer import SwinTransformer
 from .swin_transformer_v2 import SwinTransformerV2
 from .swin_transformer_g import SwinTransformerG
+from .swin_transformer_s import SwinTransformerS
 
 
 def build_model(config):
@@ -82,6 +83,25 @@ def build_model(config):
                                  token_drop_max=config.MODEL.SWIN_G.TOKEN_DROP_MAX,
                                  token_drop_min=config.MODEL.SWIN_G.TOKEN_DROP_MIN,
                                  token_drop_pattern=config.MODEL.SWIN_G.TOKEN_DROP_PATTERN,
+                                 fused_window_process=config.FUSED_WINDOW_PROCESS)
+    if model_type == 'swin_s':
+        model = SwinTransformerS(img_size=config.DATA.IMG_SIZE,
+                                 patch_size=config.MODEL.SWIN_S.PATCH_SIZE,
+                                 in_chans=config.MODEL.SWIN_S.IN_CHANS,
+                                 num_classes=config.MODEL.NUM_CLASSES,
+                                 embed_dim=config.MODEL.SWIN_S.EMBED_DIM,
+                                 depths=config.MODEL.SWIN_S.DEPTHS,
+                                 num_heads=config.MODEL.SWIN_S.NUM_HEADS,
+                                 window_size=config.MODEL.SWIN_S.WINDOW_SIZE,
+                                 mlp_ratio=config.MODEL.SWIN_S.MLP_RATIO,
+                                 qkv_bias=config.MODEL.SWIN_S.QKV_BIAS,
+                                 qk_scale=config.MODEL.SWIN_S.QK_SCALE,
+                                 drop_rate=config.MODEL.DROP_RATE,
+                                 drop_path_rate=config.MODEL.DROP_PATH_RATE,
+                                 ape=config.MODEL.SWIN_S.APE,
+                                 norm_layer=layernorm,
+                                 patch_norm=config.MODEL.SWIN_S.PATCH_NORM,
+                                 use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                  fused_window_process=config.FUSED_WINDOW_PROCESS)
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")

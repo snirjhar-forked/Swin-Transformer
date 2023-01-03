@@ -81,7 +81,7 @@ def gindex_cuda(*args, **kwargs):
     return randpos, relative_index
 
 class WindowAttention(nn.Module):
-    def __init__(self, dim, window_size, num_heads, input_resolution, shift_size, std=None,
+    def __init__(self, dim, window_size, subwindow_size, num_heads, input_resolution, shift_size, std=None,
                  qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
 
         super().__init__()
@@ -93,14 +93,11 @@ class WindowAttention(nn.Module):
         
         self.input_resolution = input_resolution
         self.shift_size = shift_size
-        if min(input_resolution) <= window_size:
-            self.subwindow_size = None
-        else:
-            assert window_size % 2 == 0, "Window size must be even."
-            self.subwindow_size = window_size // 2
-            assert self.subwindow_size < min(input_resolution), "Subwindow size must be less than min(input_resolution)."
+        self.subwindow_size = subwindow_size
+        if subwindow_size is not None:
             self.subwindow_length = self.subwindow_size * self.subwindow_size
-            self.num_subwindows = input_resolution[0] * input_resolution[1] // (self.subwindow_size * self.subwindow_size)
+            self.num_subwindows = (input_resolution[0] * input_resolution[1] 
+                                     // (self.subwindow_size * self.subwindow_size))
         if std is None:
             std = self.subwindow_size
         self.std = std
@@ -207,7 +204,7 @@ class WindowAttention(nn.Module):
 
 
 class SwinTransformerBlock(nn.Module):
-    def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
+    def __init__(self, dim, input_resolution, num_heads, window_size=14, subwindow_size=7, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  fused_window_process=False):
@@ -222,16 +219,12 @@ class SwinTransformerBlock(nn.Module):
             # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
-            self.subwindow_size = None
-        else:
-            assert window_size % 2 == 0, "Window size must be even."
-            self.subwindow_size = window_size // 2
-            assert self.subwindow_size < min(input_resolution), "Subwindow size must be less than min(input_resolution)."
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+        self.subwindow_size = subwindow_size
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
-            dim, window_size=self.window_size, num_heads=num_heads,
+            dim, window_size=self.window_size, subwindow_size=subwindow_size, num_heads=num_heads,
             input_resolution=input_resolution, shift_size=shift_size,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
@@ -275,7 +268,7 @@ class SwinTransformerBlock(nn.Module):
         x = self.norm1(x)
         
         if self.training and self.subwindow_size is not None:
-            x_windows = x
+            x = self.attn(x, mask=self.attn_mask)  # nW*B, window_size*window_size, C
         else:
             # cyclic shift
             x = x.view(B, H, W, C)
@@ -294,12 +287,9 @@ class SwinTransformerBlock(nn.Module):
 
             x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
-        # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
-        
-        if not self.training or self.subwindow_size is None:
-            x = attn_windows
-        else:
+            # W-MSA/SW-MSA
+            attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+            
             # merge windows
             attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
 
@@ -403,7 +393,7 @@ class BasicLayer(nn.Module):
         self.use_checkpoint = use_checkpoint
         
         self.window_size = window_size
-        if min(input_resolution) <= window_size:
+        if min(input_resolution) <= (window_size + 1)//2:
             self.subwindow_size = None
         else:
             assert window_size % 2 == 0, "Window size must be even."
@@ -414,6 +404,7 @@ class BasicLayer(nn.Module):
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
                                  num_heads=num_heads, window_size=window_size,
+                                 subwindow_size=self.subwindow_size,
                                  shift_size=0 if (i % 2 == 0) else window_size // 2,
                                  mlp_ratio=mlp_ratio,
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,

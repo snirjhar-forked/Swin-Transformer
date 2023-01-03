@@ -11,22 +11,25 @@ def index_2d(dims):
             indices[y,x,1] = x
     return indices
 
-
 @nb.njit
-def alpha_2d(dims, stds):
+def alpha_2d(dims, stds, wins, shifts):
     h,w = dims
     sigma_y, sigma_x = stds
+    y_win, x_win = wins
+    y_shift, x_shift = shifts
 
     py = 1/(sigma_y**2)
     px = 1/(sigma_x**2)
-    alpha_y = np.empty((h,h), dtype=np.float64)
-    alpha_x = np.empty((w,w), dtype=np.float64)
+    alpha_y = np.zeros((h,h), dtype=np.float64)
+    alpha_x = np.zeros((w,w), dtype=np.float64)
     for cy1 in range(h):
         for cy2 in range(h):
-            alpha_y[cy1,cy2] = np.exp(py*(cy1-cy2))
+            if (cy1-y_shift)//y_win == (cy2-y_shift)//y_win:
+                alpha_y[cy1,cy2] = np.exp(py*(cy1-cy2))
     for cx1 in range(w):
         for cx2 in range(w):
-            alpha_x[cx1,cx2] = np.exp(px*(cx1-cx2))
+            if (cx1-x_shift)//x_win == (cx2-x_shift)//x_win:
+                alpha_x[cx1,cx2] = np.exp(px*(cx1-cx2))
     return alpha_y, alpha_x
 
 @nb.njit
@@ -77,37 +80,61 @@ def gshuf_2d(indices, alphas, inner_dims, outer_dims, steps):
     return indices
 
 @nb.njit
-def hgshuf_2d(indices, alphas, num_blocks, steps):
-    h, w, _ = indices.shape
-    by, bx = num_blocks
-
-    cur_indices = indices.copy()
-    for ny in range(by):
-        for nx in range(bx):
-            top = (ny*h)//by
-            bottom = (ny*h+h)//by
-            left = (nx*w)//bx
-            right = (nx*w+w)//bx
-            inner_dims = (top, right)
-            outer_dims = (bottom, w)
-            cur_indices = gshuf_2d(cur_indices, alphas, inner_dims, outer_dims, steps)
-            indices[top:bottom,left:right] = cur_indices[top:bottom,left:right]
-    return indices
-
-@nb.njit
-def gindex_2d(dims, stds, steps):
+def gindex_2d(dims, stds, wins, shifts, steps):
     indices = index_2d(dims)
-    alphas = alpha_2d(dims, stds)
+    alphas = alpha_2d(dims, stds, wins, shifts)
     indices = gshuf_2d(indices, alphas, dims, dims, steps)
     return indices
 
-@nb.njit
-def hgindex_2d(dims, stds, num_blocks, steps):
-    indices = index_2d(dims)
-    alphas = alpha_2d(dims, stds)
-    indices = hgshuf_2d(indices, alphas, num_blocks, steps)
-    return indices
 
+@nb.njit
+def gindex(dims, std, window_size, shift, steps):
+    h, w = dims
+    subwindow_size = window_size//2
+    H, W = h//subwindow_size, w//subwindow_size
+
+    wins = (window_size, window_size)
+    stds = (std, std)
+    shifts = (shift, shift)
+    coords = gindex_2d(dims, stds, wins, shifts, steps)
+
+    stride1 = subwindow_size
+    stride2 = subwindow_size * subwindow_size
+    stride3 = w * subwindow_size
+
+    max_r = window_size - 1
+    range_r = 2*window_size - 1
+
+    indices = np.empty((H,W,subwindow_size,subwindow_size), dtype=np.int64)
+    relatives = np.empty((H,W,subwindow_size,subwindow_size,
+                          subwindow_size,subwindow_size),
+                         dtype=np.int64)
+    for Y in range(H):
+        for X in range(W):
+            Yoff = Y * subwindow_size
+            Xoff = X * subwindow_size
+            for y in range(subwindow_size):
+                for x in range(subwindow_size):
+                    yy = Yoff + y
+                    xx = Xoff + x
+                    
+                    cyy = coords[yy,xx,0]
+                    cxx = coords[yy,xx,1]
+                    cy = cyy % subwindow_size
+                    cx = cxx % subwindow_size
+                    cY = cyy // subwindow_size
+                    cX = cxx // subwindow_size
+                    indices[Y,X,y,x] = (cx + cy*stride1
+                                        + cX*stride2 + cY*stride3)
+                    for y2 in range(subwindow_size):
+                        for x2 in range(subwindow_size):
+                            yy2 = Yoff + y2
+                            xx2 = Xoff + x2
+                            relatives[Y,X,y2,x2,y,x] = ((cyy-yy2+max_r)*range_r
+                                                          + cxx-xx2+max_r)
+    indices = indices.ravel()
+    relatives = relatives.ravel()
+    return indices, relatives
 
 if __name__ == '__main__':
     shuffled_indices = gindex_2d((16,16), (1,1), 200) #(4,4),

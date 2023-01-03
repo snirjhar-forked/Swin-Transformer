@@ -126,14 +126,8 @@ class WindowAttention(nn.Module):
     def forward(self, x, mask=None):
         if self.training and self.subwindow_size is not None:
             B, L, C = x.shape
-            try:
-                q = self.q_lin(x).reshape(B, self.num_subwindows, self.subwindow_length, self.num_heads, C // self.num_heads)\
-                                    .permute(0, 3, 1, 2, 4) # B, nH, nW, Wl, C
-            except Exception as e:
-                print(x.shape)
-                print(self.subwindow_size, self.num_subwindows, self.subwindow_length)
-                raise e
-            
+            q = self.q_lin(x).reshape(B, self.num_subwindows, self.subwindow_length, self.num_heads, C // self.num_heads)\
+                                .permute(0, 3, 1, 2, 4) # B, nH, nW, Wl, C
             randpos, relative_index = gindex_cuda(self.input_resolution, self.std, self.window_size, self.shift_size, 200)
             x_kv = torch.index_select(x, 1, randpos)
             kv = self.kv_lin(x_kv).reshape(B, self.num_subwindows, self.subwindow_length, 2, self.num_heads, C // self.num_heads)\
@@ -148,6 +142,7 @@ class WindowAttention(nn.Module):
             relative_position_params = relative_position_params.permute(3, 0, 1, 2).contiguous() # 2*nH, nW, Wl, Wl
             relative_position_bias, relative_position_scale = torch.chunk(relative_position_params, 2, dim=0) # nH, nW, Wl, Wl
             attn = attn + relative_position_bias
+            attn = self.softmax(attn)
             attn = attn * relative_position_scale
             
             attn = self.attn_drop(attn)
@@ -224,8 +219,8 @@ class SwinTransformerBlock(nn.Module):
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
-            dim, window_size=self.window_size, subwindow_size=subwindow_size, num_heads=num_heads,
-            input_resolution=input_resolution, shift_size=shift_size,
+            dim, window_size=self.window_size, subwindow_size=self.subwindow_size, num_heads=num_heads,
+            input_resolution=self.input_resolution, shift_size=self.shift_size,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

@@ -109,7 +109,15 @@ class WindowAttention(nn.Module):
         relative_index = get_relative_index((self.window_size, self.window_size))
         self.register_buffer("relative_index", relative_index)
 
+        if self.subwindow_size is None:
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+            self.q_lin = self._q_lin
+            self.kv_lin = self._kv_lin
+        else:
+            self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
+            self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
+            self.qkv = self._qkv
+            
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -117,10 +125,14 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
     
-    def q_lin(self, x):
+    def _q_lin(self, x):
         return F.linear(x, self.qkv.weight[:self.dim], self.qkv.bias[:self.dim])
-    def kv_lin(self, x):
+    def _kv_lin(self, x):
         return F.linear(x, self.qkv.weight[self.dim:], self.qkv.bias[self.dim:])
+    def _qkv(self, x):
+        weight = torch.cat([self.q_lin.weight, self.kv_lin.weight], dim=0)
+        bias = torch.cat([self.q_lin.bias, self.kv_lin.bias], dim=0)
+        return F.linear(x, weight, bias)
 
     def forward(self, x, mask=None):
         if self.training and self.subwindow_size is not None:

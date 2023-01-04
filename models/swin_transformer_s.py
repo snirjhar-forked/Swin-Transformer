@@ -125,15 +125,20 @@ class WindowAttention(nn.Module):
     def forward(self, x, mask=None):
         if self.training and self.subwindow_size is not None:
             B, L, C = x.shape
-            q = self.q_lin(x).reshape(B, self.num_subwindows, self.subwindow_length, self.num_heads, C // self.num_heads)\
-                                .permute(0, 3, 1, 2, 4) # B, nH, nW, Wl, C
-            randpos, relative_index = gindex_cuda(self.input_resolution, self.std, self.window_size, self.shift_size, 200)
+            q = self.q_lin(x).view(B, L, self.num_heads, self.head_dim).transpose(1,2) # B, nH, L, C
+            
+            randpos, relative_index = gindex_cuda(self.input_resolution, self.std,
+                                                  self.window_size, self.shift_size, 200)
             x_kv = torch.index_select(x, 1, randpos)
-            kv = self.kv_lin(x_kv).reshape(B, self.num_subwindows, self.subwindow_length, 2, self.num_heads, C // self.num_heads)\
-                                   .permute(3, 0, 4, 1, 2, 5)
-            k, v = kv.unbind(0) # B, nH, nW, Wl, C
+            kv = self.kv_lin(x_kv).view(B, L, self.num_heads*2, self.head_dim).transpose(1,2) # B, 2*nH, L, C
+            k, v = kv.chunk(2, dim=1) # B, nH, L, C
             
             q = q * self.scale
+            
+            q = q.view(B, self.num_heads, self.num_subwindows, self.subwindow_length, self.head_dim)
+            k = k.view(B, self.num_heads, self.num_subwindows, self.subwindow_length, self.head_dim)
+            v = v.view(B, self.num_heads, self.num_subwindows, self.subwindow_length, self.head_dim)
+            
             attn = (q @ k.transpose(-2, -1)) # B, nH, nW, Wl, Wl
             
             relative_position_params = self.relative_table[relative_index].view(self.num_subwindows,
@@ -145,8 +150,10 @@ class WindowAttention(nn.Module):
             attn = attn * relative_position_scale
             
             attn = self.attn_drop(attn)
-
-            x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B, L, C)
+            
+            x = attn @ v
+            x = x.view(B, self.num_heads, L, self.head_dim)
+            x = x.transpose(1,2).reshape(B, L, C)
         else:
             B_, N, C = x.shape
             qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -389,7 +396,7 @@ class BasicLayer(nn.Module):
             assert window_size % 2 == 0, "Window size must be even."
             self.subwindow_size = window_size // 2
             assert self.subwindow_size < min(input_resolution), "Subwindow size must be less than min(input_resolution)."
-
+        
         # build blocks
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(dim=dim, input_resolution=input_resolution,

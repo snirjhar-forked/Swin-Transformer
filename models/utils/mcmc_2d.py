@@ -1,7 +1,7 @@
 import numba as nb
 import numpy as np
 
-@nb.njit
+@nb.njit(nogil=True)
 def index_2d(dims):
     h, w = dims
     indices = np.empty((h,w,2), dtype=np.int64)
@@ -11,7 +11,7 @@ def index_2d(dims):
             indices[y,x,1] = x
     return indices
 
-@nb.njit
+@nb.njit(nogil=True)
 def alpha_2d(dims, stds, wins, shifts):
     h,w = dims
     sigma_y, sigma_x = stds
@@ -32,23 +32,20 @@ def alpha_2d(dims, stds, wins, shifts):
                 alpha_x[cx1,cx2] = np.exp(px*(cx1-cx2))
     return alpha_y, alpha_x
 
-@nb.njit
-def gsample_2d_(indices, alphas, inner_dims, outer_dims, sample_buffer, warmup=0):
-    h1,w1 = inner_dims
-    h2,w2 = outer_dims
+@nb.njit(nogil=True)
+def gsample_2d_(index_buffer, alphas, sample_buffer, warmup=0):
+    h,w,_ = index_buffer.shape
     alpha_y, alpha_x = alphas
-    
     num_samples = sample_buffer.shape[0]
-    num_steps = warmup + num_samples
     
-    placement_order = np.arange(num_steps, dtype=np.int64)
+    placement_order = np.arange(num_samples, dtype=np.int64)
     np.random.shuffle(placement_order)
     
+    num_steps = warmup + num_samples
     for cur_step in range(num_steps):
-        ind_y1 = indices[0]
-        for y2 in range(1,h2):
-            ind_y2 = indices[y2]
-            w = w2 if y2<h1 else w1
+        ind_y1 = index_buffer[0]
+        for y2 in range(1,h):
+            ind_y2 = index_buffer[y2]
             for x in range(w):
                 cy1 = ind_y1[x,0]
                 cy2 = ind_y2[x,0]
@@ -65,10 +62,9 @@ def gsample_2d_(indices, alphas, inner_dims, outer_dims, sample_buffer, warmup=0
             ind_y1 = ind_y2
 
         
-        ind_x1 = indices[:,0]
-        for x2 in range(1,w2):
-            ind_x2 = indices[:,x2]
-            h = h2 if x2<w1 else h1
+        ind_x1 = index_buffer[:,0]
+        for x2 in range(1,w):
+            ind_x2 = index_buffer[:,x2]
             for y in range(h):
                 cx1 = ind_x1[y,1]
                 cx2 = ind_x2[y,1]
@@ -85,46 +81,4 @@ def gsample_2d_(indices, alphas, inner_dims, outer_dims, sample_buffer, warmup=0
             ind_x1 = ind_x2
         
         if cur_step >= warmup:
-            sample_buffer[placement_order[cur_step-warmup]] = indices
-
-
-@nb.njit
-def sub_index_(coords, window_size, subwindow_size, indices, relatives):
-    h, w, _ = coords.shape
-    subwindow_size = window_size//2
-    H, W = h//subwindow_size, w//subwindow_size
-
-    stride1 = subwindow_size
-    stride2 = subwindow_size * subwindow_size
-    stride3 = w * subwindow_size
-
-    max_r = window_size - 1
-    range_r = 2*window_size - 1
-
-    indices = indices.reshape(H,W,subwindow_size,subwindow_size)
-    relatives = relatives.reshape(H,W,subwindow_size,subwindow_size,
-                                      subwindow_size,subwindow_size)
-    for Y in range(H):
-        for X in range(W):
-            Yoff = Y * subwindow_size
-            Xoff = X * subwindow_size
-            for y in range(subwindow_size):
-                for x in range(subwindow_size):
-                    yy = Yoff + y
-                    xx = Xoff + x
-                    
-                    cyy = coords[yy,xx,0]
-                    cxx = coords[yy,xx,1]
-                    cy = cyy % subwindow_size
-                    cx = cxx % subwindow_size
-                    cY = cyy // subwindow_size
-                    cX = cxx // subwindow_size
-                    indices[Y,X,y,x] = (cx + cy*stride1
-                                        + cX*stride2 + cY*stride3)
-                    for y2 in range(subwindow_size):
-                        for x2 in range(subwindow_size):
-                            yy2 = Yoff + y2
-                            xx2 = Xoff + x2
-                            relatives[Y,X,y2,x2,y,x] = ((cyy-yy2+max_r)*range_r
-                                                          + cxx-xx2+max_r)
-
+            sample_buffer[placement_order[cur_step-warmup]] = index_buffer

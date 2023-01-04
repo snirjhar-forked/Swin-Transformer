@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
-from .mcmc_2d import gindex
+from .utils import SubindexGen
 
 try:
     import os, sys
@@ -74,12 +74,6 @@ def get_relative_index(dims):
     relative_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
     return relative_index
 
-def gindex_cuda(*args, **kwargs):
-    randpos, relative_index = gindex(*args, **kwargs)
-    randpos = torch.from_numpy(randpos).pin_memory().cuda(non_blocking=True)
-    relative_index = torch.from_numpy(relative_index).pin_memory().cuda(non_blocking=True)
-    return randpos, relative_index
-
 class WindowAttention(nn.Module):
     def __init__(self, dim, window_size, subwindow_size, num_heads, input_resolution, shift_size, std=0.5,
                  qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -98,6 +92,8 @@ class WindowAttention(nn.Module):
             self.num_subwindows = (input_resolution[0] * input_resolution[1] 
                                      // (self.subwindow_size * self.subwindow_size))
             self.std = self.window_size * std
+            self.subindex_gen = iter(SubindexGen(self.window_size, self.subwindow_size,
+                                            self.input_resolution, self.shift_size, self.std))
         else:
             self.std = None
 
@@ -110,9 +106,7 @@ class WindowAttention(nn.Module):
         self.register_buffer("relative_index", relative_index)
 
         if self.subwindow_size is None:
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-            self.q_lin = self._q_lin
-            self.kv_lin = self._kv_lin
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         else:
             self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
             self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
@@ -125,22 +119,20 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
     
-    def _q_lin(self, x):
-        return F.linear(x, self.qkv.weight[:self.dim], self.qkv.bias[:self.dim])
-    def _kv_lin(self, x):
-        return F.linear(x, self.qkv.weight[self.dim:], self.qkv.bias[self.dim:])
     def _qkv(self, x):
         weight = torch.cat([self.q_lin.weight, self.kv_lin.weight], dim=0)
         bias = torch.cat([self.q_lin.bias, self.kv_lin.bias], dim=0)
         return F.linear(x, weight, bias)
-
+    
     def forward(self, x, mask=None):
         if self.training and self.subwindow_size is not None:
             B, L, C = x.shape
             q = self.q_lin(x).view(B, L, self.num_heads, self.head_dim).transpose(1,2) # B, nH, L, C
             
-            randpos, relative_index = gindex_cuda(self.input_resolution, self.std,
-                                                  self.window_size, self.shift_size, 200)
+            randpos, relative_index = next(self.subindex_gen)
+            randpos = randpos.to(x.device, non_blocking=True)
+            relative_index = relative_index.to(x.device, non_blocking=True)
+            
             x_kv = torch.index_select(x, 1, randpos)
             kv = self.kv_lin(x_kv).view(B, L, self.num_heads*2, self.head_dim).transpose(1,2) # B, 2*nH, L, C
             k, v = kv.chunk(2, dim=1) # B, nH, L, C

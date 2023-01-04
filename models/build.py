@@ -93,6 +93,7 @@ def build_model(config):
                                  depths=config.MODEL.SWIN_S.DEPTHS,
                                  num_heads=config.MODEL.SWIN_S.NUM_HEADS,
                                  window_size=config.MODEL.SWIN_S.WINDOW_SIZE,
+                                 std=config.MODEL.SWIN_S.STD,
                                  mlp_ratio=config.MODEL.SWIN_S.MLP_RATIO,
                                  qkv_bias=config.MODEL.SWIN_S.QKV_BIAS,
                                  qk_scale=config.MODEL.SWIN_S.QK_SCALE,

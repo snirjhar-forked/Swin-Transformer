@@ -81,15 +81,14 @@ def gindex_cuda(*args, **kwargs):
     return randpos, relative_index
 
 class WindowAttention(nn.Module):
-    def __init__(self, dim, window_size, subwindow_size, num_heads, input_resolution, shift_size, std=None,
+    def __init__(self, dim, window_size, subwindow_size, num_heads, input_resolution, shift_size, std=0.5,
                  qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
-
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.head_dim = dim // num_heads
+        self.scale = qk_scale or self.head_dim ** -0.5
         
         self.input_resolution = input_resolution
         self.shift_size = shift_size
@@ -98,9 +97,9 @@ class WindowAttention(nn.Module):
             self.subwindow_length = self.subwindow_size * self.subwindow_size
             self.num_subwindows = (input_resolution[0] * input_resolution[1] 
                                      // (self.subwindow_size * self.subwindow_size))
-        if std is None:
-            std = self.subwindow_size
-        self.std = std
+            self.std = self.window_size * std
+        else:
+            self.std = None
 
         # define a parameter table of relative position bias
         self.relative_table = nn.Parameter(
@@ -180,7 +179,8 @@ class WindowAttention(nn.Module):
         return x
 
     def extra_repr(self) -> str:
-        return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
+        return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}, ' \
+                f'subwindow_size={self.subwindow_size}, shift_size={self.shift_size}, std={self.std}'
 
     def flops(self, N):
         # calculate flops for 1 window with token length of N
@@ -200,7 +200,7 @@ class WindowAttention(nn.Module):
 
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, window_size=14, subwindow_size=7, shift_size=0,
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
+                 std=0.5, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  fused_window_process=False):
         super().__init__()
@@ -220,7 +220,7 @@ class SwinTransformerBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
             dim, window_size=self.window_size, subwindow_size=self.subwindow_size, num_heads=num_heads,
-            input_resolution=self.input_resolution, shift_size=self.shift_size,
+            input_resolution=self.input_resolution, shift_size=self.shift_size, std=std,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -327,14 +327,6 @@ class SwinTransformerBlock(nn.Module):
 
 
 class PatchMerging(nn.Module):
-    r""" Patch Merging Layer.
-
-    Args:
-        input_resolution (tuple[int]): Resolution of input feature.
-        dim (int): Number of input channels.
-        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-    """
-
     def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
         super().__init__()
         self.input_resolution = input_resolution
@@ -377,7 +369,7 @@ class PatchMerging(nn.Module):
 
 class BasicLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
+                 std=0.5, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
                  fused_window_process=False):
 
@@ -387,8 +379,11 @@ class BasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         
+        if not isinstance(std, list):
+            std = [std] * depth
+        
         self.window_size = window_size
-        if min(input_resolution) <= (window_size + 1)//2:
+        if min(input_resolution) <= (window_size + 1)//2 or all([s < 0 for s in std]):
             self.subwindow_size = None
         else:
             assert window_size % 2 == 0, "Window size must be even."
@@ -400,6 +395,7 @@ class BasicLayer(nn.Module):
             SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
                                  num_heads=num_heads, window_size=window_size,
                                  subwindow_size=self.subwindow_size,
+                                 std=std[i],
                                  shift_size=0 if (i % 2 == 0) else window_size // 2,
                                  mlp_ratio=mlp_ratio,
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
@@ -430,7 +426,8 @@ class BasicLayer(nn.Module):
         return x
 
     def extra_repr(self) -> str:
-        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}, " \
+               f"subwindow_size={self.subwindow_size}, window_size={self.window_size}"
 
     def flops(self):
         flops = 0
@@ -442,16 +439,6 @@ class BasicLayer(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    r""" Image to Patch Embedding
-
-    Args:
-        img_size (int): Image size.  Default: 224.
-        patch_size (int): Patch token size. Default: 4.
-        in_chans (int): Number of input image channels. Default: 3.
-        embed_dim (int): Number of linear projection output channels. Default: 96.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
-    """
-
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
         img_size = to_2tuple(img_size)
@@ -494,7 +481,7 @@ class PatchEmbed(nn.Module):
 class SwinTransformerS(nn.Module):
     def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
-                 window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, std='0.5',
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  use_checkpoint=False, fused_window_process=False, **kwargs):
@@ -522,6 +509,12 @@ class SwinTransformerS(nn.Module):
             trunc_normal_(self.absolute_pos_embed, std=.02)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
+        std = eval(std)
+        if not isinstance(std, list):
+            std = [std] * self.num_layers
+        for d_layer in range(self.num_layers):
+            if not isinstance(std[d_layer], list):
+                std[d_layer] = [std[d_layer]] * depths[d_layer]
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
@@ -535,6 +528,7 @@ class SwinTransformerS(nn.Module):
                                depth=depths[i_layer],
                                num_heads=num_heads[i_layer],
                                window_size=window_size,
+                               std=std[i_layer],
                                mlp_ratio=self.mlp_ratio,
                                qkv_bias=qkv_bias, qk_scale=qk_scale,
                                drop=drop_rate, attn_drop=attn_drop_rate,

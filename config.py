@@ -87,6 +87,7 @@ _C.MODEL.SWIN_S.QKV_BIAS = True
 _C.MODEL.SWIN_S.QK_SCALE = None
 _C.MODEL.SWIN_S.APE = False
 _C.MODEL.SWIN_S.PATCH_NORM = True
+_C.MODEL.SWIN_S.STD = '0.5'
 
 # Swin Gated
 # Swin Transformer parameters

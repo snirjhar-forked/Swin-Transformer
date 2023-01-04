@@ -33,11 +33,18 @@ def alpha_2d(dims, stds, wins, shifts):
     return alpha_y, alpha_x
 
 @nb.njit
-def gshuf_2d(indices, alphas, inner_dims, outer_dims, steps):
+def gsample_2d_(indices, alphas, inner_dims, outer_dims, sample_buffer, warmup=0):
     h1,w1 = inner_dims
     h2,w2 = outer_dims
     alpha_y, alpha_x = alphas
-    for _ in range(steps):
+    
+    num_samples = sample_buffer.shape[0]
+    num_steps = warmup + num_samples
+    
+    placement_order = np.arange(num_steps, dtype=np.int64)
+    np.random.shuffle(placement_order)
+    
+    for cur_step in range(num_steps):
         ind_y1 = indices[0]
         for y2 in range(1,h2):
             ind_y2 = indices[y2]
@@ -77,26 +84,15 @@ def gshuf_2d(indices, alphas, inner_dims, outer_dims, steps):
                 ind_x2[y,1] = cx2+rf*(cx1-cx2)
             ind_x1 = ind_x2
         
-    return indices
-
-@nb.njit
-def gindex_2d(dims, stds, wins, shifts, steps):
-    indices = index_2d(dims)
-    alphas = alpha_2d(dims, stds, wins, shifts)
-    indices = gshuf_2d(indices, alphas, dims, dims, steps)
-    return indices
+        if cur_step >= warmup:
+            sample_buffer[placement_order[cur_step-warmup]] = indices
 
 
 @nb.njit
-def gindex(dims, std, window_size, shift, steps):
-    h, w = dims
+def sub_index_(coords, window_size, subwindow_size, indices, relatives):
+    h, w, _ = coords.shape
     subwindow_size = window_size//2
     H, W = h//subwindow_size, w//subwindow_size
-
-    wins = (window_size, window_size)
-    stds = (std, std)
-    shifts = (shift, shift)
-    coords = gindex_2d(dims, stds, wins, shifts, steps)
 
     stride1 = subwindow_size
     stride2 = subwindow_size * subwindow_size
@@ -105,10 +101,9 @@ def gindex(dims, std, window_size, shift, steps):
     max_r = window_size - 1
     range_r = 2*window_size - 1
 
-    indices = np.empty((H,W,subwindow_size,subwindow_size), dtype=np.int64)
-    relatives = np.empty((H,W,subwindow_size,subwindow_size,
-                          subwindow_size,subwindow_size),
-                         dtype=np.int64)
+    indices = indices.reshape(H,W,subwindow_size,subwindow_size)
+    relatives = relatives.reshape(H,W,subwindow_size,subwindow_size,
+                                      subwindow_size,subwindow_size)
     for Y in range(H):
         for X in range(W):
             Yoff = Y * subwindow_size
@@ -132,21 +127,4 @@ def gindex(dims, std, window_size, shift, steps):
                             xx2 = Xoff + x2
                             relatives[Y,X,y2,x2,y,x] = ((cyy-yy2+max_r)*range_r
                                                           + cxx-xx2+max_r)
-    indices = indices.ravel()
-    relatives = relatives.ravel()
-    return indices, relatives
-
-if __name__ == '__main__':
-    shuffled_indices = gindex_2d((16,16), (1,1), 200) #(4,4),
-    for i in range(shuffled_indices.shape[0]):
-        print('\t'.join([f'({x:2d},{y:2d})' for x,y in shuffled_indices[i]]))
-    
-    # indices_1d, rev_indices_1d = block_index((16,16), (4,4))
-    # shuffled_indices_1d = index_rearrange(shuffled_indices, indices_1d, rev_indices_1d)
-    # print(np.arange(16*16,dtype=int).reshape(16,16))
-    # print(indices_1d)
-    # print(rev_indices_1d)
-    # print(rev_indices_1d[indices_1d])
-    # print(shuffled_indices_1d)
-    # print(shuffled_indices_1d.reshape(4,4,4,4).swapaxes(1,2).reshape(16,16))
 

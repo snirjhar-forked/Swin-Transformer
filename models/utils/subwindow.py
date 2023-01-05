@@ -40,8 +40,8 @@ def subindex_(coords, window_size, subwindow_size, indices, relatives):
                         for x2 in range(subwindow_size):
                             yy2 = Yoff + y2
                             xx2 = Xoff + x2
-                            relatives[Y,X,y2,x2,y,x] = ((cyy-yy2+max_r)*range_r
-                                                          + cxx-xx2+max_r)
+                            relatives[Y,X,y2,x2,y,x] = ((yy2-cyy+max_r)*range_r
+                                                          + xx2-cxx+max_r)
 
 
 class SubindexGen:

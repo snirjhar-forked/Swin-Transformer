@@ -103,6 +103,7 @@ def build_model(config):
                                  norm_layer=layernorm,
                                  patch_norm=config.MODEL.SWIN_S.PATCH_NORM,
                                  use_checkpoint=config.TRAIN.USE_CHECKPOINT,
+                                 split_kv=config.MODEL.SWIN_S.SPLIT_KV,
                                  fused_window_process=config.FUSED_WINDOW_PROCESS)
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")

@@ -221,6 +221,8 @@ _C.PRINT_FREQ = 10
 _C.SEED = 0
 # Perform evaluation only, overwritten by command line argument
 _C.EVAL_MODE = False
+# Prediction samples
+_C.NUM_PRED_SAMPLES = 1
 # Test throughput only, overwritten by command line argument
 _C.THROUGHPUT_MODE = False
 # local rank for DistributedDataParallel, given by command line argument
@@ -288,7 +290,8 @@ def update_config(config, args):
         config.EVAL_MODE = True
     if _check_args('throughput'):
         config.THROUGHPUT_MODE = True
-
+    if _check_args('num_pred_samples'):
+        config.NUM_PRED_SAMPLES = args.num_pred_samples
 
     # for acceleration
     if _check_args('fused_window_process'):

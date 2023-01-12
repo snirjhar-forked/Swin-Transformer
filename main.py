@@ -70,7 +70,8 @@ def parse_option():
     ## overwrite optimizer in config (*.yaml) if specified, e.g., fused_adam/fused_lamb
     parser.add_argument('--optim', type=str,
                         help='overwrite optimizer if provided, can be adamw/sgd/fused_adam/fused_lamb.')
-
+    parser.add_argument('--num_pred_samples', type=int, default=1,
+                        help='number of samples to predict for each image, only used for testing')
     args, unparsed = parser.parse_known_args()
 
     config = get_config(args)
@@ -225,7 +226,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 @torch.no_grad()
 def validate(config, data_loader, model):
     criterion = torch.nn.CrossEntropyLoss()
-    model.eval()
+    if config.NUM_PRED_SAMPLES == 1:
+        model.eval()
+    else:
+        model.train()
 
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
@@ -239,7 +243,19 @@ def validate(config, data_loader, model):
 
         # compute output
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            output = model(images)
+            if config.NUM_PRED_SAMPLES == 1:
+                output = model(images)
+            else:
+                num_samples = config.NUM_PRED_SAMPLES
+                probs = None
+                for _ in range(num_samples):
+                    sample_out = model(images)
+                    if probs is None:
+                        probs = torch.softmax(sample_out, 1)
+                    else:
+                        probs += torch.softmax(sample_out, 1)
+                probs = probs / num_samples
+                output = torch.log(probs + torch.finfo(probs.dtype).eps)
 
         # measure accuracy and record loss
         loss = criterion(output, target)

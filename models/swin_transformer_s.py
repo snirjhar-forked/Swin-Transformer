@@ -392,8 +392,10 @@ class BasicLayer(nn.Module):
         
         if not isinstance(std, list):
             std = [std] * depth
+        assert len(std) == depth, "std must be a list of length depth."
         
         self.window_size = window_size
+        self.subwindow_start_point = -1
         if min(input_resolution) <= (window_size + 1)//2 or all([s < 0 for s in std]):
             self.subwindow_size = None
         else:
@@ -401,11 +403,17 @@ class BasicLayer(nn.Module):
             self.subwindow_size = window_size // 2
             assert self.subwindow_size < min(input_resolution), "Subwindow size must be less than min(input_resolution)."
         
+            for i,s in enumerate(std):
+                if s >= 0:
+                    self.subwindow_start_point = i
+                    break
+            assert all(s>=0 for s in std[self.subwindow_start_point:]), "std must be non-negative."
+        
         # build blocks
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
                                  num_heads=num_heads, window_size=window_size,
-                                 subwindow_size=self.subwindow_size,
+                                 subwindow_size=self.subwindow_size if std[i]>=0 else None,
                                  std=std[i],
                                  shift_size=0 if (i % 2 == 0) else window_size // 2,
                                  mlp_ratio=mlp_ratio,
@@ -424,9 +432,10 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
-        if self.training and self.subwindow_size is not None:
-            x = subwindow_partition(x, self.subwindow_size, *self.input_resolution)
-        for blk in self.blocks:
+        for i,blk in enumerate(self.blocks):
+            if (self.training and self.subwindow_size is not None
+                and i == self.subwindow_start_point):
+                x = subwindow_partition(x, self.subwindow_size, *self.input_resolution)
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:

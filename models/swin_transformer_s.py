@@ -76,7 +76,7 @@ def get_relative_index(dims):
 
 class WindowAttention(nn.Module):
     def __init__(self, dim, window_size, subwindow_size, num_heads, input_resolution, shift_size, std=0.5,
-                 qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., split_kv=False):
+                 qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., split_kv=None):
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
@@ -104,13 +104,18 @@ class WindowAttention(nn.Module):
         # get pair-wise relative position index for each token inside the window
         relative_index = get_relative_index((self.window_size, self.window_size))
         self.register_buffer("relative_index", relative_index)
+        
+        if split_kv is None:
+            split_kv = (self.subwindow_size is not None)
 
-        if self.subwindow_size is not None or split_kv:
+        if split_kv:
             self.q_lin = nn.Linear(dim, dim, bias=qkv_bias)
             self.kv_lin = nn.Linear(dim, dim * 2, bias=qkv_bias)
             self.qkv = self._qkv
         else:
             self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+            self.q_lin = self._q_lin
+            self.kv_lin = self._kv_lin
             
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -118,6 +123,11 @@ class WindowAttention(nn.Module):
 
         trunc_normal_(self.relative_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
+        
+    def _q_lin(self, x):
+        return F.linear(x, self.qkv.weight[:self.dim], self.qkv.bias[:self.dim])
+    def _kv_lin(self, x):
+        return F.linear(x, self.qkv.weight[self.dim:], self.qkv.bias[self.dim:])
     
     def _qkv(self, x):
         weight = torch.cat([self.q_lin.weight, self.kv_lin.weight], dim=0)
@@ -212,7 +222,7 @@ class WindowAttention(nn.Module):
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, window_size=14, subwindow_size=7, shift_size=0,
                  std=0.5, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, split_kv=False,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, split_kv=None,
                  fused_window_process=False):
         super().__init__()
         self.dim = dim
@@ -382,7 +392,7 @@ class BasicLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  std=0.5, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
-                 fused_window_process=False, split_kv=False):
+                 fused_window_process=False, split_kv=None):
 
         super().__init__()
         self.dim = dim
@@ -392,6 +402,8 @@ class BasicLayer(nn.Module):
         
         if not isinstance(std, list):
             std = [std] * depth
+        if not isinstance(split_kv, list):
+            split_kv = [split_kv] * depth
         assert len(std) == depth, "std must be a list of length depth."
         
         self.window_size = window_size
@@ -421,7 +433,7 @@ class BasicLayer(nn.Module):
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                                  norm_layer=norm_layer,
-                                 split_kv=split_kv,
+                                 split_kv=split_kv[i],
                                  fused_window_process=fused_window_process)
             for i in range(depth)])
 
@@ -504,7 +516,7 @@ class SwinTransformerS(nn.Module):
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, std='0.5',
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
-                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True, split_kv='False',
+                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True, split_kv='None',
                  use_checkpoint=False, fused_window_process=False, **kwargs):
         super().__init__()
 
@@ -540,6 +552,9 @@ class SwinTransformerS(nn.Module):
         split_kv = eval(split_kv)
         if not isinstance(split_kv, list):
             split_kv = [split_kv] * self.num_layers
+        for d_layer in range(self.num_layers):
+            if not isinstance(split_kv[d_layer], list):
+                split_kv[d_layer] = [split_kv[d_layer]] * depths[d_layer]
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
